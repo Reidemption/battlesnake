@@ -15,3 +15,7 @@ channel = "stable-21_11"
 
 [gitHubImport]
 requiredFiles = [".replit", "replit.nix"]
+
+[deployment]
+deploymentTarget = "cloudrun"
+run = ["make", "run"]
