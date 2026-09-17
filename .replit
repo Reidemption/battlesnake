@@ -18,4 +18,13 @@ requiredFiles = [".replit", "replit.nix"]
 
 [deployment]
 deploymentTarget = "cloudrun"
-run = ["make", "run"]
+build = ["go", "build", "-o", "battlesnake", "."]
+run = ["./battlesnake"]
+
+[[ports]]
+localPort = 8000
+externalPort = 80
+
+[[ports]]
+localPort = 18000
+externalPort = 3000
