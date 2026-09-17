@@ -17,30 +17,33 @@ var directions = []struct {
 }
 
 const (
-	killBonus       = 500
-	threatPenalty   = 1000
-	proximityWeight = 10
-	spaceWeight     = 20
-	trapPenalty     = 100
+	// A contested square is only ever worth entering if we are longer, and this snake
+	// never tries to be longer, so every contested square is refused.
+	threatPenalty = 1000
+	spaceWeight   = 20
+	trapPenalty   = 100
 	// Room beyond twice our length is indistinguishable in practice, and capping it
 	// keeps an open board from swamping every other term.
 	spaceHorizon = 2
-
-	baseFoodWeight  = 4
-	hungerThreshold = 50
-	hungerScale     = 2
-	// Must exceed proximityWeight, or losing the length race still loses to the urge to chase.
-	contestedFoodWeight = 12
-	// One piece of food must not flip a head-to-head we committed to on the previous turn.
-	huntMargin = 2
-	// Held under trapPenalty so starvation never argues us into a dead end.
-	maxFoodWeight = 60
+	// Following our own tail is what produces the coil; kept well under the space terms
+	// so it shapes the path instead of walking us into a pocket.
+	tailWeight = 6
+	// The ring we hold around the food we have claimed. Radius 2 is the smallest diamond
+	// that never forces a step onto the food itself.
+	orbitRadius = 2
+	orbitWeight = 8
+	// Health is a percentage, so this is the 25% mark where circling gives way to eating.
+	eatThreshold     = 25
+	eatWeight        = 40
+	foodAvoidPenalty = 60
 )
 
 // Scores every legal neighbour of our head and takes the best, breaking ties at random.
 func chooseMove(state GameState) BattlesnakeMoveResponse {
-	occupied := occupiedSquares(state.Board.Snakes)
-	target := huntTarget(state)
+	occupied := occupiedSquares(state)
+	// Picked from the head so every candidate is judged against the same food; picking it
+	// per candidate would let the claim flip direction mid-orbit.
+	target, hasTarget := nearestFood(state.You.Head, state.Board.Food)
 
 	bestScore := math.MinInt
 	best := []string{}
@@ -51,7 +54,7 @@ func chooseMove(state GameState) BattlesnakeMoveResponse {
 			continue
 		}
 
-		score := scoreMove(next, state, target, occupied)
+		score := scoreMove(next, state, target, hasTarget, occupied)
 		if score > bestScore {
 			bestScore = score
 			best = []string{dir.Name}
@@ -66,7 +69,7 @@ func chooseMove(state GameState) BattlesnakeMoveResponse {
 	return BattlesnakeMoveResponse{Move: best[rand.Intn(len(best))]}
 }
 
-func scoreMove(next Coord, state GameState, target *Battlesnake, occupied map[Coord]bool) int {
+func scoreMove(next Coord, state GameState, target Coord, hasTarget bool, occupied map[Coord]bool) int {
 	score := 0
 
 	reachable := reachableSpace(next, state.Board, occupied)
@@ -79,39 +82,46 @@ func scoreMove(next Coord, state GameState, target *Battlesnake, occupied map[Co
 		if snake.ID == state.You.ID {
 			continue
 		}
-		// Squares adjacent to a head are contested: whoever is longer survives the trade.
 		if manhattan(next, snake.Head) <= 1 {
-			if snake.Length < state.You.Length {
-				score += killBonus
-			} else {
-				score -= threatPenalty
-			}
+			score -= threatPenalty
 		}
 	}
 
-	if target != nil {
-		score -= manhattan(next, target.Head) * proximityWeight
+	if tail, ok := ownTail(state.You); ok {
+		score -= manhattan(next, tail) * tailWeight
 	}
 
-	if food, ok := nearestFood(next, state.Board.Food); ok {
-		behind := longestOpponent(state) >= state.You.Length
-		score -= manhattan(next, food) * foodWeight(state.You.Health, behind)
+	if hasTarget {
+		distance := manhattan(next, target)
+		if state.You.Health <= eatThreshold {
+			score -= distance * eatWeight
+		} else {
+			score -= abs(distance-orbitRadius) * orbitWeight
+			if isFood(next, state.Board.Food) {
+				// Stepping on food is not optional, so an unwanted segment can only be
+				// declined by refusing the square.
+				score -= foodAvoidPenalty
+			}
+		}
 	}
 
 	return score
 }
 
-// Scales from mild growth pressure when fed and dominant to an overriding pull when
-// starving or losing the length race.
-func foodWeight(health int, behind bool) int {
-	weight := baseFoodWeight
-	if behind {
-		weight += contestedFoodWeight
+func isFood(c Coord, food []Coord) bool {
+	for _, f := range food {
+		if f == c {
+			return true
+		}
 	}
-	if health < hungerThreshold {
-		weight += (hungerThreshold - health) * hungerScale
+	return false
+}
+
+func ownTail(you Battlesnake) (Coord, bool) {
+	if len(you.Body) < 2 {
+		return Coord{}, false
 	}
-	return minInt(weight, maxFoodWeight)
+	return you.Body[len(you.Body)-1], true
 }
 
 func nearestFood(from Coord, food []Coord) (Coord, bool) {
@@ -126,30 +136,6 @@ func nearestFood(from Coord, food []Coord) (Coord, bool) {
 	}
 
 	return found, closest < math.MaxInt
-}
-
-// Nearest snake we outlength by enough to survive the trade, or nil when chasing
-// anything would cost us the length race instead.
-func huntTarget(state GameState) *Battlesnake {
-	if longestOpponent(state) >= state.You.Length {
-		return nil
-	}
-
-	var target *Battlesnake
-	closest := math.MaxInt
-
-	for i := range state.Board.Snakes {
-		snake := &state.Board.Snakes[i]
-		if snake.ID == state.You.ID || snake.Length+huntMargin > state.You.Length {
-			continue
-		}
-		if d := manhattan(state.You.Head, snake.Head); d < closest {
-			closest = d
-			target = snake
-		}
-	}
-
-	return target
 }
 
 // Squares connected to start through free ground, start included.
@@ -178,25 +164,21 @@ func reachableSpace(start Coord, board Board, occupied map[Coord]bool) int {
 	return len(seen)
 }
 
-func longestOpponent(state GameState) int {
-	longest := 0
-	for _, snake := range state.Board.Snakes {
-		if snake.ID == state.You.ID {
-			continue
-		}
-		longest = maxInt(longest, snake.Length)
-	}
-	return longest
-}
-
-func occupiedSquares(snakes []Battlesnake) map[Coord]bool {
+func occupiedSquares(state GameState) map[Coord]bool {
 	occupied := map[Coord]bool{}
-	for _, snake := range snakes {
-		// The tail vacates this turn unless the snake just ate, which we ignore here.
-		for _, part := range snake.Body {
+
+	for _, snake := range state.Board.Snakes {
+		body := snake.Body
+		// Our own tail moves off its square as we advance, which is the whole reason
+		// following it is legal. Health at full means we just ate and it stays put.
+		if snake.ID == state.You.ID && len(body) > 1 && snake.Health < 100 {
+			body = body[:len(body)-1]
+		}
+		for _, part := range body {
 			occupied[part] = true
 		}
 	}
+
 	return occupied
 }
 
@@ -218,13 +200,6 @@ func abs(n int) int {
 // The min and max builtins arrived in Go 1.21; replit.nix pins Go 1.17.
 func minInt(a, b int) int {
 	if a < b {
-		return a
-	}
-	return b
-}
-
-func maxInt(a, b int) int {
-	if a > b {
 		return a
 	}
 	return b
